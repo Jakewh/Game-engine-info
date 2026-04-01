@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/SteamClientHomebrew/Millennium/main/src/sys/plugin-schema.json",
+  "name": "game-engine-info",
+  "common_name": "Game Engine Info",
+  "description": "Shows the game engine on Steam game pages.",
+  "version": "0.1.0",
+  "useBackend": true,
+  "backendType": "lua",
+  "frontend": "frontend",
+  "include": ["frontend", "backend", ".millennium"]
+}
