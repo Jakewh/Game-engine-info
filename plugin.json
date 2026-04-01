@@ -3,7 +3,7 @@
   "name": "game-engine-info",
   "common_name": "Game Engine Info",
   "description": "Shows the game engine on Steam game pages.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "useBackend": true,
   "backendType": "lua",
   "frontend": "frontend",

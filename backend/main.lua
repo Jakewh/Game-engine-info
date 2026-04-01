@@ -2,103 +2,13 @@ local logger = require("logger")
 local millennium = require("millennium")
 local http = require("http")
 local json = require("json")
+local settings = require("settings")
 
 local TIMEOUT = 10
 
 local function trim(value)
-    if not value then
-        return ""
-    end
+    if not value then return "" end
     return (value:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function strip_html(value)
-    if not value then
-        return ""
-    end
-    local normalized = value:gsub("<[^>]->", " ")
-    normalized = normalized:gsub("%s+", " ")
-    return trim(normalized)
-end
-
-local function is_challenge_page(html)
-    local lowered = html:lower()
-    return lowered:find("just a moment", 1, true)
-        or lowered:find("cf%-mitigated", 1, true)
-        or lowered:find("captcha", 1, true)
-end
-
-local function parse_engine_from_steamdb(html)
-    if not html or html == "" then
-        return nil
-    end
-
-    if is_challenge_page(html) then
-        return nil
-    end
-
-    local cell = html:match("[Gg]ame%s*[Ee]ngine%s*</th>%s*<td[^>]->(.-)</td>")
-    if not cell then
-        cell = html:match("[Ee]ngine%s*</th>%s*<td[^>]->(.-)</td>")
-    end
-    if cell then
-        local parsed = strip_html(cell)
-        if parsed ~= "" then
-            return parsed
-        end
-    end
-
-    local plain = html:match("\n%s*[Ee]ngine%s*\n%s*([^\n]+)")
-    if plain then
-        plain = trim(plain)
-        if plain ~= "" and plain:lower() ~= "n/a" and plain:lower() ~= "unknown" and plain:lower() ~= "none" then
-            return plain
-        end
-    end
-
-    return nil
-end
-
-local function steamdb_request(url)
-    local response, err = http.get(url, {
-        timeout = TIMEOUT,
-        headers = {
-            ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            ["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
-        }
-    })
-
-    if not response then
-        return nil, err or "request failed"
-    end
-
-    if response.status ~= 200 then
-        return nil, "HTTP " .. tostring(response.status)
-    end
-
-    return response.body, nil
-end
-
-local function fetch_engine_from_steamdb(appid)
-    local urls = {
-        "https://steamdb.info/app/" .. tostring(appid) .. "/tech/",
-        "https://steamdb.info/app/" .. tostring(appid) .. "/info/",
-        "https://steamdb.info/app/" .. tostring(appid) .. "/"
-    }
-
-    for _, url in ipairs(urls) do
-        local body, err = steamdb_request(url)
-        if body then
-            local engine = parse_engine_from_steamdb(body)
-            if engine then
-                return engine, "steamdb"
-            end
-        else
-            logger:warn("SteamDB request failed for " .. url .. ": " .. tostring(err))
-        end
-    end
-
-    return nil, "SteamDB engine not found"
 end
 
 local function url_encode(str)
@@ -115,6 +25,10 @@ local function split_csv(value)
     return result
 end
 
+-- ---------------------------------------------------------------------------
+-- PCGamingWiki
+-- ---------------------------------------------------------------------------
+
 local function fetch_engine_from_pcgw(appid)
     local where = 'Steam_AppID HOLDS "' .. tostring(appid) .. '"'
     local params = {
@@ -124,23 +38,14 @@ local function fetch_engine_from_pcgw(appid)
         "fields=Engines,Steam_AppID",
         "where=" .. url_encode(where)
     }
-
     local url = "https://www.pcgamingwiki.com/w/api.php?" .. table.concat(params, "&")
     local response, err = http.get(url, { timeout = TIMEOUT })
 
-    if not response then
-        return nil, err or "request failed"
-    end
-
-    if response.status ~= 200 then
-        return nil, "HTTP " .. tostring(response.status)
-    end
+    if not response then return nil, err or "request failed" end
+    if response.status ~= 200 then return nil, "HTTP " .. tostring(response.status) end
 
     local ok, payload = pcall(json.decode, response.body)
-    if not ok or not payload then
-        return nil, "Invalid JSON from PCGamingWiki"
-    end
-
+    if not ok or not payload then return nil, "Invalid JSON from PCGamingWiki" end
     if type(payload.cargoquery) ~= "table" or #payload.cargoquery == 0 then
         return nil, "No PCGamingWiki data"
     end
@@ -155,17 +60,109 @@ local function fetch_engine_from_pcgw(appid)
     for _, part in ipairs(split_csv(engines_raw)) do
         local value = part:gsub("^%s*[Ee]ngine:%s*", "")
         value = trim(value)
-        if value ~= "" then
-            table.insert(cleaned, value)
+        if value ~= "" then table.insert(cleaned, value) end
+    end
+
+    if #cleaned == 0 then return nil, "Engine parsing produced no values" end
+    return table.concat(cleaned, ", "), "pcgamingwiki"
+end
+
+-- ---------------------------------------------------------------------------
+-- RAWG.io
+-- ---------------------------------------------------------------------------
+
+local function get_game_name_from_steam(appid)
+    local url = "https://store.steampowered.com/api/appdetails?appids=" .. tostring(appid) .. "&filters=basic"
+    local response, err = http.get(url, { timeout = TIMEOUT })
+    if not response then return nil, "Steam API request failed: " .. tostring(err or "unknown") end
+    if response.status ~= 200 then return nil, "Steam API HTTP " .. tostring(response.status) end
+
+    local ok, data = pcall(json.decode, response.body)
+    if not ok or type(data) ~= "table" then return nil, "Invalid JSON from Steam API" end
+
+    local app = data[tostring(appid)]
+    if not app or not app.success or type(app.data) ~= "table" then
+        return nil, "App not found in Steam API"
+    end
+
+    local name = app.data.name
+    if type(name) ~= "string" or name == "" then return nil, "No name in Steam API" end
+    return name, nil
+end
+
+local function fetch_engine_from_rawg(appid, api_key)
+    if not api_key or trim(api_key) == "" then
+        return nil, "No RAWG API key configured"
+    end
+    api_key = trim(api_key)
+
+    -- Step 1: Get game name from Steam
+    local name, err = get_game_name_from_steam(appid)
+    if not name then
+        logger:warn("RAWG: Could not get game name for " .. tostring(appid) .. ": " .. tostring(err))
+        return nil, "Could not get game name: " .. tostring(err)
+    end
+
+    -- Step 2: Search RAWG (filter by Steam store = stores=1)
+    local search_url = "https://api.rawg.io/api/games"
+        .. "?key=" .. url_encode(api_key)
+        .. "&search=" .. url_encode(name)
+        .. "&stores=1&page_size=5"
+
+    local search_response, serr = http.get(search_url, { timeout = TIMEOUT })
+    if not search_response then
+        return nil, "RAWG search failed: " .. tostring(serr or "unknown")
+    end
+    if search_response.status ~= 200 then
+        return nil, "RAWG search HTTP " .. tostring(search_response.status)
+    end
+
+    local ok2, search_data = pcall(json.decode, search_response.body)
+    if not ok2 or type(search_data) ~= "table" or type(search_data.results) ~= "table" then
+        return nil, "Invalid RAWG search response"
+    end
+    if #search_data.results == 0 then
+        return nil, "No RAWG results for: " .. tostring(name)
+    end
+
+    local rawg_id = search_data.results[1].id
+    if not rawg_id then return nil, "No RAWG game ID in results" end
+
+    -- Step 3: Get game details for engine info
+    local detail_url = "https://api.rawg.io/api/games/" .. tostring(rawg_id)
+        .. "?key=" .. url_encode(api_key)
+
+    local detail_response, derr = http.get(detail_url, { timeout = TIMEOUT })
+    if not detail_response then
+        return nil, "RAWG detail failed: " .. tostring(derr or "unknown")
+    end
+    if detail_response.status ~= 200 then
+        return nil, "RAWG detail HTTP " .. tostring(detail_response.status)
+    end
+
+    local ok3, detail = pcall(json.decode, detail_response.body)
+    if not ok3 or type(detail) ~= "table" then
+        return nil, "Invalid RAWG detail response"
+    end
+
+    if type(detail.game_engines) == "table" and #detail.game_engines > 0 then
+        local engines = {}
+        for _, e in ipairs(detail.game_engines) do
+            if type(e.name) == "string" and e.name ~= "" then
+                table.insert(engines, e.name)
+            end
+        end
+        if #engines > 0 then
+            return table.concat(engines, ", "), "rawg"
         end
     end
 
-    if #cleaned == 0 then
-        return nil, "Engine parsing produced no values"
-    end
-
-    return table.concat(cleaned, ", "), "pcgamingwiki"
+    return nil, "No engine data in RAWG for: " .. tostring(name)
 end
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
 
 function GetEngine(appid, contentScriptQuery)
     local numeric_appid = tonumber(appid)
@@ -173,34 +170,71 @@ function GetEngine(appid, contentScriptQuery)
         return json.encode({ success = false, error = "Invalid appid" })
     end
 
+    logger:info("GetEngine request for appid " .. tostring(numeric_appid))
+
     local ok, result = pcall(function()
-        local engine, source_or_error = fetch_engine_from_steamdb(numeric_appid)
+        -- 1. PCGamingWiki
+        local engine, err = fetch_engine_from_pcgw(numeric_appid)
         if engine then
-            return json.encode({ success = true, engine = engine, source = source_or_error })
+            logger:info("GetEngine PCGW success for " .. tostring(numeric_appid) .. ": " .. tostring(engine))
+            return json.encode({ success = true, engine = engine, source = "pcgamingwiki" })
         end
+        logger:info("GetEngine PCGW miss for " .. tostring(numeric_appid) .. ": " .. tostring(err))
 
-        local fallback_engine, fallback_source_or_error = fetch_engine_from_pcgw(numeric_appid)
-        if fallback_engine then
-            return json.encode({ success = true, engine = fallback_engine, source = fallback_source_or_error })
+        -- 2. RAWG fallback (only if API key configured)
+        local cfg = settings.load()
+        local rawg_engine, rawg_err = fetch_engine_from_rawg(numeric_appid, cfg.rawg_api_key)
+        if rawg_engine then
+            logger:info("GetEngine RAWG success for " .. tostring(numeric_appid) .. ": " .. tostring(rawg_engine))
+            return json.encode({ success = true, engine = rawg_engine, source = "rawg" })
         end
+        logger:info("GetEngine RAWG miss for " .. tostring(numeric_appid) .. ": " .. tostring(rawg_err))
 
-        return json.encode({
-            success = false,
-            error = "Engine not found",
-            details = {
-                steamdb = source_or_error,
-                pcgamingwiki = fallback_source_or_error
-            }
-        })
+        logger:warn("GetEngine not found for " .. tostring(numeric_appid))
+        return json.encode({ success = false, error = "Engine not found" })
     end)
 
     if not ok then
         logger:error("GetEngine failed: " .. tostring(result))
         return json.encode({ success = false, error = tostring(result) })
     end
-
     return result
 end
+
+function GetSettings()
+    local ok, result = pcall(function()
+        local current = settings.load()
+        return json.encode({ success = true, data = current })
+    end)
+    if not ok then
+        logger:error("GetSettings error: " .. tostring(result))
+        return json.encode({ success = false, error = tostring(result) })
+    end
+    return result
+end
+
+function SaveSettings(settings_json)
+    local ok, result = pcall(function()
+        local parsed = json.decode(settings_json)
+        if type(parsed) ~= "table" then
+            return json.encode({ success = false, error = "Invalid settings JSON" })
+        end
+        local merged = settings.merge_defaults(parsed)
+        if not settings.save(merged) then
+            return json.encode({ success = false, error = "Failed to write settings file" })
+        end
+        return json.encode({ success = true })
+    end)
+    if not ok then
+        logger:error("SaveSettings error: " .. tostring(result))
+        return json.encode({ success = false, error = tostring(result) })
+    end
+    return result
+end
+
+-- ---------------------------------------------------------------------------
+-- Lifecycle
+-- ---------------------------------------------------------------------------
 
 local function on_load()
     logger:info("game-engine-info Lua backend loaded")
@@ -218,5 +252,8 @@ end
 return {
     on_load = on_load,
     on_frontend_loaded = on_frontend_loaded,
-    on_unload = on_unload
+    on_unload = on_unload,
+    GetEngine = GetEngine,
+    GetSettings = GetSettings,
+    SaveSettings = SaveSettings,
 }

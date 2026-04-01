@@ -1,9 +1,25 @@
 "use strict";
 
 const PANEL_ID = "game-engine-info-row";
+const LIBRARY_PANEL_ID = "game-engine-library-info";
 const ROUTE_POLL_MS = 800;
 const RESULT_CACHE = new Map();
+const DISPLAY_CACHE = new Map();
 const PLUGIN_NAME = "game-engine-info";
+
+// ---------------------------------------------------------------------------
+// Store context helpers (webkit.js — store.steampowered.com)
+// ---------------------------------------------------------------------------
+
+function isStoreLikeContext() {
+    const href = String(window.location.href || "");
+    const path = String(window.location.pathname || "");
+    return href.includes("store.steampowered.com")
+        || href.includes("steamcommunity.com")
+        || /^\/app\//.test(path)
+        || /^\/bundle\//.test(path)
+        || /^\/sub\//.test(path);
+}
 
 function getAppIdFromUrl() {
     const match = window.location.pathname.match(/^\/app\/(\d+)/);
@@ -82,61 +98,9 @@ function setPanel(text) {
     }
 }
 
-function stripHtml(value) {
-    return value
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
-function parseEngineFromHtml(html) {
-    try {
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        const rows = doc.querySelectorAll("tr");
-        for (const row of rows) {
-            const header = row.querySelector("th");
-            const value = row.querySelector("td");
-            if (!header || !value) {
-                continue;
-            }
-            const label = (header.textContent || "").trim();
-            if (/^engine$/i.test(label) || /^game engine$/i.test(label)) {
-                const result = (value.textContent || "").replace(/\s+/g, " ").trim();
-                if (result) {
-                    return result;
-                }
-            }
-        }
-    } catch {
-        // Ignore parser errors and fallback to regex.
-    }
-
-    const htmlMatch = html.match(/(?:Game\s*)?Engine\s*<\/th>\s*<td[^>]*>(.*?)<\/td>/is);
-    if (htmlMatch && htmlMatch[1]) {
-        const result = stripHtml(htmlMatch[1]);
-        if (result) {
-            return result;
-        }
-    }
-
-    const techMatch = html.match(/(?:^|\n)\s*Engine\s*\n\s*([^\n]+)/i);
-    if (techMatch && techMatch[1]) {
-        const result = stripHtml(techMatch[1]);
-        if (result && !/^(n\/a|unknown|none)$/i.test(result)) {
-            return result;
-        }
-    }
-
-    const markdownMatch = html.match(/(?:^|\n)\s*(?:Game\s*)?Engine\s*\|\s*([^\n|]+)/i);
-    if (markdownMatch && markdownMatch[1]) {
-        const result = markdownMatch[1].trim();
-        if (result) {
-            return result;
-        }
-    }
-
-    return null;
-}
+// ---------------------------------------------------------------------------
+// Backend bridge
+// ---------------------------------------------------------------------------
 
 async function fetchEngine(appId) {
     if (RESULT_CACHE.has(appId)) {
@@ -167,7 +131,148 @@ async function fetchEngine(appId) {
     return payload.engine;
 }
 
-let lastAppId = null;
+// ---------------------------------------------------------------------------
+// Library mode
+// In the Millennium client module (index.js), `document` is the shell window,
+// NOT the Library popup. We use AddWindowCreateHook (same pattern as
+// hltb-for-millennium) to get the real popup document and inject there.
+// ---------------------------------------------------------------------------
+
+let libraryObserver = null;
+let lastLibraryAppId = null;
+
+function getLibraryCurrentAppId() {
+    // MainWindowBrowserManager path looks like /app/868360, not /library/app/868360
+    const pathname = window.MainWindowBrowserManager?.m_lastLocation?.pathname || "";
+    const match = pathname.match(/\/app\/(\d+)/);
+    return match ? match[1] : null;
+}
+
+function injectLibraryPanel(doc, text) {
+    let panel = doc.getElementById(LIBRARY_PANEL_ID);
+    if (!panel) {
+        panel = doc.createElement("div");
+        panel.id = LIBRARY_PANEL_ID;
+        panel.style.position = "fixed";
+        panel.style.top = "130px";
+        panel.style.right = "16px";
+        panel.style.zIndex = "999999";
+        panel.style.display = "inline-flex";
+        panel.style.alignItems = "center";
+        panel.style.gap = "4px";
+        panel.style.padding = "4px 8px";
+        panel.style.background = "rgba(15, 23, 32, 0.85)";
+        panel.style.border = "1px solid rgba(255,255,255,0.12)";
+        panel.style.borderRadius = "6px";
+        panel.style.fontSize = "14px";
+        panel.style.lineHeight = "1.35";
+        panel.style.color = "#9da8b3";
+
+        const label = doc.createElement("span");
+        label.textContent = "Game engine: ";
+
+        const value = doc.createElement("span");
+        value.style.color = "#66c0f4";
+        value.style.fontWeight = "600";
+
+        panel.appendChild(label);
+        panel.appendChild(value);
+        doc.body.appendChild(panel);
+    }
+    const value = panel.lastElementChild;
+    if (value) {
+        value.textContent = text;
+    }
+}
+
+async function handleLibraryNavigation(doc) {
+    const appId = getLibraryCurrentAppId();
+
+    if (!appId) {
+        doc.getElementById(LIBRARY_PANEL_ID)?.remove();
+        lastLibraryAppId = null;
+        return;
+    }
+
+    const cacheKey = "library:" + appId;
+
+    if (appId === lastLibraryAppId) {
+        // Re-inject if React re-render removed the panel
+        if (DISPLAY_CACHE.has(cacheKey) && !doc.getElementById(LIBRARY_PANEL_ID)) {
+            injectLibraryPanel(doc, DISPLAY_CACHE.get(cacheKey));
+        }
+        return;
+    }
+
+    lastLibraryAppId = appId;
+
+    // Serve from cache instantly if available
+    if (DISPLAY_CACHE.has(cacheKey)) {
+        injectLibraryPanel(doc, DISPLAY_CACHE.get(cacheKey));
+        return;
+    }
+
+    injectLibraryPanel(doc, "loading...");
+
+    try {
+        const engine = await fetchEngine(appId);
+        DISPLAY_CACHE.set(cacheKey, engine);
+        if (lastLibraryAppId === appId) {
+            injectLibraryPanel(doc, engine);
+        }
+    } catch {
+        const text = "not found";
+        DISPLAY_CACHE.set(cacheKey, text);
+        if (lastLibraryAppId === appId) {
+            injectLibraryPanel(doc, text);
+        }
+    }
+}
+
+function setupLibraryOnDoc(doc) {
+    if (libraryObserver) {
+        libraryObserver.disconnect();
+        libraryObserver = null;
+    }
+
+    const win = doc.defaultView || window;
+    libraryObserver = new win.MutationObserver(() => {
+        handleLibraryNavigation(doc);
+    });
+    libraryObserver.observe(doc.body, { childList: true, subtree: true });
+
+    handleLibraryNavigation(doc);
+}
+
+function setupLibraryHook() {
+    // Try existing popup first — may already be open when plugin loads
+    try {
+        const existing = window.g_PopupManager?.GetExistingPopup?.("SP Desktop_uid0");
+        if (existing?.m_popup?.document?.body) {
+            setupLibraryOnDoc(existing.m_popup.document);
+        }
+    } catch {
+        // Ignore
+    }
+
+    // Hook into future popup creations (same pattern as hltb-for-millennium)
+    window.Millennium?.AddWindowCreateHook?.(function(windowInfo) {
+        if (!windowInfo.m_strName?.startsWith("SP ")) {
+            return;
+        }
+        const doc = windowInfo.m_popup?.document;
+        if (!doc?.body) {
+            return;
+        }
+        setupLibraryOnDoc(doc);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Store poll loop
+// ---------------------------------------------------------------------------
+
+let lastViewKey = null;
 let activeRequestId = 0;
 
 async function refreshForCurrentPage() {
@@ -177,24 +282,23 @@ async function refreshForCurrentPage() {
 
     const appId = getAppIdFromUrl();
     if (!appId) {
-        const row = document.getElementById(PANEL_ID);
-        if (row) {
-            row.remove();
-        }
-        lastAppId = null;
+        document.getElementById(PANEL_ID)?.remove();
+        lastViewKey = null;
         return;
     }
 
-    if (appId === lastAppId) {
-        if (RESULT_CACHE.has(appId) && !document.getElementById(PANEL_ID)) {
-            setPanel(RESULT_CACHE.get(appId));
+    const viewKey = "store:" + appId;
+
+    if (viewKey === lastViewKey) {
+        const cached = DISPLAY_CACHE.get(viewKey);
+        if (cached !== undefined && !document.getElementById(PANEL_ID)) {
+            setPanel(cached);
         }
         return;
     }
 
-    lastAppId = appId;
+    lastViewKey = viewKey;
     const requestId = ++activeRequestId;
-
     setPanel("loading...");
 
     try {
@@ -202,18 +306,30 @@ async function refreshForCurrentPage() {
         if (requestId !== activeRequestId) {
             return;
         }
+        DISPLAY_CACHE.set(viewKey, engine);
         setPanel(engine);
     } catch {
         if (requestId !== activeRequestId) {
             return;
         }
+        DISPLAY_CACHE.set(viewKey, "not found");
         setPanel("not found");
     }
 }
 
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 function start() {
-    refreshForCurrentPage();
-    window.setInterval(refreshForCurrentPage, ROUTE_POLL_MS);
+    if (isStoreLikeContext()) {
+        // webkit.js: poll for Store page changes
+        refreshForCurrentPage();
+        window.setInterval(refreshForCurrentPage, ROUTE_POLL_MS);
+    } else {
+        // index.js (client module): hook into Library popup window
+        setupLibraryHook();
+    }
 }
 
 if (document.readyState === "loading") {
