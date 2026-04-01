@@ -1,4 +1,4 @@
-# Engine Info
+# Game Engine Info
 
 Millennium plugin that shows a game's engine directly on Steam game pages.
 
