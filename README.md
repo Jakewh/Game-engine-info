@@ -25,7 +25,13 @@ Millennium plugin that shows a game's engine directly on Steam game pages.
 ## Notes
 
 - Source is https://www.pcgamingwiki.com
-- If engine info is not available on PCGamingWiki, panel shows `not found`
+- Fallback 1: Local installation directory detection (looks for Unity, Unreal, Godot, GameMaker, Ren'Py, LÖVE, CryEngine, Source, id Tech signatures in game folder)
+- Fallback 2: Wikidata engine property lookup by game name
+- Fallback 3: Wikipedia infobox engine lookup by game name
+- Fallback 4: Generic internet search by game name (`<game> game engine`) with known engine keyword detection
+- Fallback 5: https://steamdb.info (first item from Technologies section)
+    - If SteamDB blocks direct requests, plugin retries with browser-like headers and then uses Brave web search by game name to find SteamDB app link
+    - If engine info is not available, panel shows `Not found on PCGameWiki`
 
 ## Credits
 
