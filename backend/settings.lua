@@ -5,12 +5,14 @@ local millennium = require("millennium")
 local M = {}
 
 M.DEFAULTS = {
-    rawg_api_key = "",
+    steamdb_cookie = "",
 }
 
 local function get_settings_path()
     return millennium.get_install_path() .. "/settings.json"
 end
+
+M.get_path = get_settings_path
 
 function M.load()
     local path = get_settings_path()
