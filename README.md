@@ -31,7 +31,7 @@ Millennium plugin that shows a game's engine directly on Steam game pages.
 - Fallback 4: Generic internet search by game name (`<game> game engine`) with known engine keyword detection
 - Fallback 5: https://steamdb.info (first item from Technologies section)
     - If SteamDB blocks direct requests, plugin retries with browser-like headers and then uses Brave web search by game name to find SteamDB app link
-    - If engine info is not available, panel shows `Not found on PCGameWiki`
+- If engine info is not available, panel shows `Not found on PCGameWiki`
 
 ## Credits
 

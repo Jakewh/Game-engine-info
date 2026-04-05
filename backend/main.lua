@@ -714,7 +714,6 @@ end
 
 local function collect_steam_library_roots()
     local home = os.getenv("HOME")
-    if not home then return {} end
 
     local roots = {}
     local seen = {}
@@ -726,9 +725,22 @@ local function collect_steam_library_roots()
         table.insert(roots, p)
     end
 
-    add_root(home .. "/.steam/steam")
-    add_root(home .. "/.local/share/Steam")
-    add_root(home .. "/.var/app/com.valvesoftware.Steam/data/Steam")
+    -- Prefer Windows default Steam install locations first.
+    local pf86 = os.getenv("PROGRAMFILES(X86)")
+    local pf = os.getenv("PROGRAMFILES")
+    if pf86 and pf86 ~= "" then
+        add_root(pf86 .. "/Steam")
+    end
+    if pf and pf ~= "" then
+        add_root(pf .. "/Steam")
+    end
+
+    -- Linux and Flatpak Steam locations.
+    if home and home ~= "" then
+        add_root(home .. "/.steam/steam")
+        add_root(home .. "/.local/share/Steam")
+        add_root(home .. "/.var/app/com.valvesoftware.Steam/data/Steam")
+    end
 
     local function read_libraryfolders(steam_root)
         local vdf_path = steam_root .. "/steamapps/libraryfolders.vdf"
@@ -787,14 +799,23 @@ end
 
 local function find_game_directory_in_steam_common(game_name)
     local home = os.getenv("HOME")
-    if not home then return nil end
+    local pf86 = os.getenv("PROGRAMFILES(X86)")
+    local pf = os.getenv("PROGRAMFILES")
     
-    -- Try multiple Steam library paths
-    local steam_paths = {
-        home .. "/.steam/steam/steamapps/common",
-        home .. "/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common",
-        home .. "/.local/share/Steam/steamapps/common",
-    }
+    -- Try multiple Steam library paths (Windows first, then Linux).
+    local steam_paths = {}
+    if pf86 and pf86 ~= "" then
+        table.insert(steam_paths, pf86 .. "/Steam/steamapps/common")
+    end
+    if pf and pf ~= "" then
+        table.insert(steam_paths, pf .. "/Steam/steamapps/common")
+    end
+    if home and home ~= "" then
+        table.insert(steam_paths, home .. "/.steam/steam/steamapps/common")
+        table.insert(steam_paths, home .. "/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common")
+        table.insert(steam_paths, home .. "/.local/share/Steam/steamapps/common")
+    end
+    if #steam_paths == 0 then return nil end
     
     local normalized_game = (game_name or ""):lower():gsub("[^%w]", "")
     if normalized_game == "" then return nil end
